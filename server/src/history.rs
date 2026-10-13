@@ -45,7 +45,7 @@ pub enum Outcome {
     },
 }
 
-/// "8a7b6c5 Speed up invoice exports for large accounts…"
+/// "8a7b6c5 Speed up exports for large repositories…"
 pub fn commit_label(sha: &str, summary: &str) -> String {
     let short = format::short_sha(sha);
     if summary.is_empty() {
@@ -502,7 +502,7 @@ pub fn next_from(blobs: &Blobs, from: &Side, line: u32, working: Option<&[u8]>) 
     let disk;
     let working_text = match working {
         Some(text) => text,
-        None => match std::fs::read(repo.root.join(&last_path)) {
+        None => match repo.read_working(&last_path) {
             Ok(text) => {
                 disk = text;
                 &disk
@@ -635,7 +635,7 @@ pub fn next_section(blobs: &Blobs, from: &Side, first: u32, last: u32, working: 
     let disk;
     let working_text = match working {
         Some(text) => text,
-        None => match std::fs::read(repo.root.join(path)) {
+        None => match repo.read_working(path) {
             Ok(text) => {
                 disk = text;
                 &disk

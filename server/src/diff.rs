@@ -627,11 +627,11 @@ mod tests {
     #[test]
     fn unequal_blocks_map_by_similarity() {
         let mut block = hunk(10, 1, 10, 4);
-        block.old_lines = vec!["$invoice = $this->store->query()->with('lines')->firstOrFail($id);".into()];
+        block.old_lines = vec!["$post = $this->posts->query()->with('comments')->firstOrFail($id);".into()];
         block.new_lines = vec![
             "Log::info('updating');".into(),
-            "$invoice = $this->store->query()".into(),
-            "    ->with('lines')".into(),
+            "$post = $this->posts->query()".into(),
+            "    ->with('comments')".into(),
             "    ->firstOrFail($id);".into(),
         ];
         let hunks = vec![block];
@@ -649,8 +649,8 @@ mod tests {
     fn moved_code_is_followed_across_blocks() {
         // A one-line statement removed above `try {` and added back, split over three lines,
         // inside it.
-        let old = "{\n$invoice = $this->store->query()->with('lines', 'customer.address')->firstOrFail($id);\n\nDB::beginTransaction();\n\ntry {\n    $invoice->fill($attributes);\n}\n";
-        let new = "{\nDB::beginTransaction();\n\ntry {\n    $invoice = $this->store->query()\n        ->with('lines', 'customer.address')\n        ->firstOrFail($id);\n\n    $invoice->fill($attributes);\n}\n";
+        let old = "{\n$post = $this->posts->query()->with('comments', 'author.profile')->firstOrFail($id);\n\nDB::beginTransaction();\n\ntry {\n    $post->fill($attributes);\n}\n";
+        let new = "{\nDB::beginTransaction();\n\ntry {\n    $post = $this->posts->query()\n        ->with('comments', 'author.profile')\n        ->firstOrFail($id);\n\n    $post->fill($attributes);\n}\n";
         let hunks = hunks(old, new);
         // Each part of the reflowed statement maps back to the removed line (old line 1).
         assert_eq!(new_to_old(&hunks, 4), NewToOld::Changed(1));
@@ -710,15 +710,15 @@ mod tests {
     #[test]
     fn moved_lines_need_a_real_match() {
         // A different statement added below a removed one is not the removed line moved.
-        let old = "fn all() {\n    $items = $this->model->with('lines')->get();\n}\n\nfn find() {\n    return null;\n}\n";
-        let new = "fn all() {\n}\n\nfn find() {\n    $item = $this->model->with('lines')->find($id);\n    return null;\n}\n";
+        let old = "fn all() {\n    $items = $this->model->with('comments')->get();\n}\n\nfn find() {\n    return null;\n}\n";
+        let new = "fn all() {\n}\n\nfn find() {\n    $item = $this->model->with('comments')->find($id);\n    return null;\n}\n";
         let first = hunks(old, new);
         assert_eq!(new_to_old(&first, 4), NewToOld::Added);
         assert!(matches!(old_to_new(&first, 1), OldToNew::Deleted(_)));
-        // A line whose own block pairs it (`* @return Invoice` → `* @return $this`) isn't
+        // A line whose own block pairs it (`* @return Post` → `* @return $this`) isn't
         // free to be someone else's moved line.
-        let old = "/**\n * @return Invoice\n */\nfoo();\n";
-        let new = "/**\n * @var InvoiceLine\n * @return $this\n */\nfoo();\n";
+        let old = "/**\n * @return Post\n */\nfoo();\n";
+        let new = "/**\n * @var Comment\n * @return $this\n */\nfoo();\n";
         let second = hunks(old, new);
         assert_eq!(new_to_old(&second, 1), NewToOld::Added);
     }
@@ -727,8 +727,8 @@ mod tests {
     fn large_blocks_map_near_their_position() {
         // 6000 rows that all gained a column, plus one inserted row: row 5000 stays 5000.
         let old: String = (0..6000).map(|n| format!("{n},item {n},{}\n", n * 3)).collect();
-        let mut rows: Vec<String> = (0..6000).map(|n| format!("{n},item {n},{},tax", n * 3)).collect();
-        rows.insert(10, "new,row,0,tax".into());
+        let mut rows: Vec<String> = (0..6000).map(|n| format!("{n},item {n},{},flag", n * 3)).collect();
+        rows.insert(10, "new,row,0,flag".into());
         let new = rows.join("\n") + "\n";
         let block = hunks(&old, &new);
         let started = std::time::Instant::now();
@@ -742,7 +742,7 @@ mod tests {
         assert!(similarity("    return $this->find($id);", "return $this->find($id);") >= SIMILAR);
         assert_eq!(similarity("", "x"), 0.0);
         assert!(similarity("foo(bar, baz)", "completely different text") < SIMILAR);
-        assert!(similarity("->with('lines', 'customer.address')", "$invoice = $this->store->with('lines', 'customer.address')->find($id);") >= SIMILAR);
+        assert!(similarity("->with('comments', 'author.profile')", "$post = $this->posts->with('comments', 'author.profile')->find($id);") >= SIMILAR);
         assert!(is_trivial("") && is_trivial("    });") && is_trivial(" */") && !is_trivial("$x = 1;"));
     }
 }

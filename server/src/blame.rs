@@ -229,7 +229,7 @@ committer Someone
 committer-mail <x@example.com>
 committer-time 1750000036
 committer-tz +0000
-summary Group invoices (#12)
+summary Group results (#12)
 boundary
 filename src/new.rs
 8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b 17 1 1
@@ -241,7 +241,7 @@ committer Someone
 committer-mail <x@example.com>
 committer-time 1700000030
 committer-tz +0000
-summary Invoices: support batches (#34)
+summary Search: support batches (#34)
 previous 2b4d6f8a0c1e3a5c7e9b1d3f5a7c9e1b3d5f7a9c src/old.rs
 filename src/new.rs
 8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b 100 4 1
@@ -270,7 +270,7 @@ filename src/new.rs
         assert_eq!(commit.filename, "src/new.rs");
         let (line, commit) = blame.line(1).unwrap();
         assert_eq!(line.orig, 127);
-        assert_eq!(commit.unwrap().summary, "Group invoices (#12)");
+        assert_eq!(commit.unwrap().summary, "Group results (#12)");
         assert!(commit.unwrap().previous.is_none());
         assert!(commit.unwrap().boundary);
         assert_eq!(blame.line(2).unwrap().0.orig, 128);

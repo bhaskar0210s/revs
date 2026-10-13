@@ -5,7 +5,7 @@
 //! the right side is `<label> <name>` (label: short commit id, `Working`), the left side
 //! `.<name>/<label>`. Zed shows two of them with its side-by-side diff
 //! (`zed --diff left right:line:column`), so the tab reads
-//! `1f3c2e9 ↔ 8a7b6c5 Invoice.php`. The left side needs no extension: Zed
+//! `1f3c2e9 ↔ 8a7b6c5 parser.rs`. The left side needs no extension: Zed
 //! highlights both sides with the right side's language (and skips parsing the left file).
 //! Snapshots never change once written and are shared between diffs; one folder per source
 //! folder keeps Zed's per-folder setup work to one run.
@@ -241,9 +241,100 @@ impl Pair {
     }
 }
 
+/// The user's home folder: `$HOME` when it is an absolute path to a folder the user owns,
+/// else the account's home folder. Never a shared folder like /tmp.
+fn home() -> &'static Path {
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        use std::os::unix::fs::MetadataExt as _;
+        let own = |dir: &Path| fs::metadata(dir).is_ok_and(|meta| meta.is_dir() && meta.uid() == unsafe { libc::getuid() });
+        if let Some(home) = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|home| home.is_absolute() && own(home))
+        {
+            return home;
+        }
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        let mut buffer = vec![0 as libc::c_char; 4096];
+        let status = unsafe {
+            libc::getpwuid_r(libc::getuid(), &mut entry, buffer.as_mut_ptr(), buffer.len(), &mut found)
+        };
+        if status == 0 && !found.is_null() && !entry.pw_dir.is_null() {
+            use std::os::unix::ffi::OsStrExt as _;
+            let dir = unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) };
+            let dir = PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes()));
+            if dir.is_absolute() {
+                return dir;
+            }
+        }
+        // No home folder at all: somewhere nobody can write, so nothing is cached.
+        PathBuf::from("/var/empty")
+    })
+}
+
 pub fn cache_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
-    PathBuf::from(home).join("Library/Caches/Revs")
+    home().join("Library/Caches/Revs")
+}
+
+/// Makes Revs's folders private to the user (snapshots hold source code and unsaved
+/// text), and its own subfolders real folders rather than links elsewhere. Run once at
+/// start, before anything is written.
+pub fn make_private_dirs() {
+    for dir in [cache_dir(), support_dir()] {
+        if fs::create_dir_all(&dir).is_ok() {
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        }
+    }
+    let cache = cache_dir();
+    for name in ["repos", ".leases", ".links", ".dirty", ".wants"] {
+        let dir = cache.join(name);
+        if fs::symlink_metadata(&dir).is_ok_and(|meta| !meta.is_dir()) {
+            let _ = fs::remove_file(&dir);
+        }
+    }
+}
+
+/// Writes a new file, refusing to follow or reuse anything already at `path` (temp files
+/// are then renamed into place), with permissions `mode`.
+pub fn write_new(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.set_permissions(fs::Permissions::from_mode(mode))
+}
+
+/// Writes `bytes` to `path` whole, through a new temp file beside it (unique per process
+/// and call, so concurrent writers never share one).
+fn replace_file(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+    let tmp = path.with_file_name(format!(".revs-{}.tmp", unique_id()));
+    if let Err(error) = write_new(&tmp, bytes, mode).and_then(|()| fs::rename(&tmp, path)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Reads one of Revs's own small records (only a regular file, at most `limit` bytes).
+pub fn read_record(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(limit).read_to_end(&mut bytes).ok()?;
+    Some(bytes)
 }
 
 /// Where repository snapshots live (apart from Revs's own files).
@@ -253,8 +344,7 @@ fn repos_dir() -> PathBuf {
 
 /// Persistent settings shared by every Revs process (e.g. the line blame toggle).
 pub fn support_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
-    PathBuf::from(home).join("Library/Application Support/Revs")
+    home().join("Library/Application Support/Revs")
 }
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -307,7 +397,7 @@ pub fn contents(blobs: &Blobs, side: &Side, working: Option<&[u8]>) -> Rc<[u8]> 
         EMPTY => Rc::from(Vec::new()),
         WORKING => match working {
             Some(text) => Rc::from(text),
-            None => Rc::from(fs::read(blobs.repo().root.join(&side.path)).unwrap_or_default()),
+            None => Rc::from(blobs.repo().read_working(&side.path).unwrap_or_default()),
         },
         rev => blobs.get(rev, &side.path),
     }
@@ -331,19 +421,28 @@ fn safe_component(name: &str) -> String {
     out
 }
 
+/// Holds the lock on `repos.json` (released when dropped).
+fn repos_lock(cache: &Path) -> io::Result<fs::File> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(cache.join(".repos.lock"))?;
+    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+    Ok(lock)
+}
+
 /// The cache folder for a repository: its folder name, made unique across repositories
 /// with the same name (case-insensitively, as the disk compares them; recorded in
 /// `repos.json`).
 fn repo_folder(repo_root: &Path) -> io::Result<PathBuf> {
     let cache = cache_dir();
     fs::create_dir_all(repos_dir())?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(cache.join(".repos.lock"))?;
-    use std::os::fd::AsRawFd as _;
-    unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+    let lock = repos_lock(&cache)?;
     let index_path = cache.join("repos.json");
     let mut index: serde_json::Map<String, Value> = fs::read(&index_path)
         .ok()
@@ -365,14 +464,34 @@ fn repo_folder(repo_root: &Path) -> io::Result<PathBuf> {
                 name_known(&known, candidate) || repos_dir().join(candidate).exists()
             });
             index.insert(key, Value::String(name.clone()));
-            let tmp = cache.join(format!(".repos.json.{}", unique_id()));
-            fs::write(&tmp, serde_json::to_vec_pretty(&index)?)?;
-            fs::rename(&tmp, &index_path)?;
+            replace_file(&index_path, &serde_json::to_vec_pretty(&index)?, 0o600)?;
             name
         }
     };
+    // Made, and marked in use, while locked: cleanup forgets names whose folder is gone,
+    // and removes folders once they are empty.
+    fs::create_dir_all(repos_dir().join(&name))?;
+    mark_in_use(&repos_dir().join(&name).join(IN_USE));
     drop(lock);
     Ok(repos_dir().join(name))
+}
+
+/// A file in each repository folder that keeps it while steps use it (no snapshot name
+/// can contain ':').
+const IN_USE: &str = ".revs:in-use";
+
+fn mark_in_use(path: &Path) {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let marker = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path);
+    if let Ok(marker) = marker {
+        let _ = marker.set_modified(SystemTime::now());
+    }
 }
 
 /// `base`, or `base 2`, `base 3`, … — the first one not `taken`.
@@ -395,11 +514,7 @@ fn write_read_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    // Unique per process and call, so concurrent writers never share a temp file.
-    let tmp = path.with_file_name(format!(".revs-{}.tmp", unique_id()));
-    fs::write(&tmp, bytes)?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o444))?;
-    fs::rename(&tmp, path)
+    replace_file(path, bytes, 0o444)
 }
 
 /// Marks a snapshot as in use (cleanup goes by modification time).
@@ -514,10 +629,7 @@ pub fn prepare(
         back,
         landing,
     };
-    let record = sidecar(&pair.right_path);
-    let tmp = record.with_file_name(format!(".revs-{}.tmp", unique_id()));
-    fs::write(&tmp, serde_json::to_vec_pretty(&pair.to_json())?)?;
-    fs::rename(tmp, record)?;
+    replace_file(&sidecar(&pair.right_path), &serde_json::to_vec_pretty(&pair.to_json())?, 0o600)?;
     Ok(pair)
 }
 
@@ -581,7 +693,7 @@ pub fn record_zed_cli_from_parent() {
     if macos_dir.ends_with("Contents/MacOS") && cli.exists() {
         let _ = PARENT_CLI.set(cli.clone());
         let _ = fs::create_dir_all(cache_dir());
-        let _ = fs::write(cache_dir().join("zed-cli"), cli.to_string_lossy().as_bytes());
+        let _ = replace_file(&cache_dir().join("zed-cli"), cli.to_string_lossy().as_bytes(), 0o600);
     }
 }
 
@@ -710,11 +822,8 @@ pub fn write_lease(files: &[PathBuf]) {
         return;
     }
     let _ = fs::create_dir_all(leases_dir());
-    let tmp = path.with_extension(format!("tmp-{}", unique_id()));
     let list: Vec<String> = files.iter().map(|file| file.to_string_lossy().into_owned()).collect();
-    if fs::write(&tmp, serde_json::to_vec(&list).unwrap_or_default()).is_ok() {
-        let _ = fs::rename(tmp, path);
-    }
+    let _ = replace_file(&path, &serde_json::to_vec(&list).unwrap_or_default(), 0o600);
 }
 
 pub fn remove_lease() {
@@ -729,13 +838,21 @@ fn leased() -> Vec<PathBuf> {
     };
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
-        let pid: Option<i32> = path.file_stem().and_then(|stem| stem.to_str()).and_then(|stem| stem.parse().ok());
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // A lease being written (`.revs-<pid>-<n>.tmp`) is its writer's to finish.
+        let pid: Option<i32> = match name.strip_prefix(".revs-") {
+            Some(temp) => temp.split('-').next().and_then(|pid| pid.parse().ok()),
+            None => path.file_stem().and_then(|stem| stem.to_str()).and_then(|stem| stem.parse().ok()),
+        };
         let alive = pid.is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0);
         if !alive {
             let _ = fs::remove_file(&path);
             continue;
         }
-        if let Ok(bytes) = fs::read(&path)
+        if name.starts_with('.') {
+            continue;
+        }
+        if let Some(bytes) = read_record(&path, 16 << 20)
             && let Ok(list) = serde_json::from_slice::<Vec<String>>(&bytes)
         {
             files.extend(list.into_iter().map(PathBuf::from));
@@ -777,10 +894,19 @@ pub fn clean_old_snapshots() {
         let _ = fs::remove_file(&trace_log);
     }
     clean_links();
+    // Unsaved text asked for by another process lives for moments; a requester that died
+    // leaves it behind.
+    let minute = SystemTime::now() - Duration::from_secs(60);
+    for entry in fs::read_dir(cache.join(".wants")).into_iter().flatten().filter_map(Result::ok) {
+        if entry.metadata().and_then(|meta| meta.modified()).is_ok_and(|modified| modified < minute) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
     let week = SystemTime::now() - Duration::from_secs(7 * 24 * 3600);
     let cutoff = zed_started().map_or(week, |started| started.max(week));
     let keep = leased();
     clean_dir(&repos_dir(), cutoff, &keep);
+    forget_cleaned_repos();
     // Repository folders of the earlier layout, directly in the cache (any name but
     // Revs's own).
     for entry in fs::read_dir(&cache).into_iter().flatten().filter_map(Result::ok) {
@@ -789,6 +915,27 @@ pub fn clean_old_snapshots() {
             clean_dir(&entry.path(), cutoff, &keep);
             let _ = fs::remove_dir(entry.path());
         }
+    }
+}
+
+/// Drops repositories whose snapshot folder is gone from `repos.json`, which would
+/// otherwise list every project ever diffed.
+fn forget_cleaned_repos() {
+    let cache = cache_dir();
+    let Ok(_lock) = repos_lock(&cache) else {
+        return;
+    };
+    let index_path = cache.join("repos.json");
+    let Some(mut index) = fs::read(&index_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes).ok())
+    else {
+        return;
+    };
+    let before = index.len();
+    index.retain(|_, name| name.as_str().is_some_and(|name| repos_dir().join(name).is_dir()));
+    if index.len() != before {
+        let _ = replace_file(&index_path, &serde_json::to_vec_pretty(&index).unwrap_or_default(), 0o600);
     }
 }
 
@@ -823,7 +970,7 @@ fn links_dir() -> PathBuf {
 }
 
 /// Stores what a hover card's link should open and returns a random id for the link.
-/// Links only work on this Mac, for a day.
+/// Links only work on this Mac, for a day (or until a few hundred newer cards were made).
 pub fn store_link(record: &Value) -> Option<String> {
     let mut bytes = [0u8; 16];
     if unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) } != 0 {
@@ -841,7 +988,43 @@ pub fn store_link(record: &Value) -> Option<String> {
         .open(links_dir().join(&id))
         .ok()?;
     file.write_all(&serde_json::to_vec(record).ok()?).ok()?;
+    drop(file);
+    forget_old_links(&id);
     Some(id)
+}
+
+/// Whether every Revs link in a card still has its record (a card made earlier can be
+/// shown again only then).
+pub fn links_alive(markdown: &str) -> bool {
+    markdown
+        .split("revs://changes?id=")
+        .skip(1)
+        .all(|rest| rest.get(..32).is_some_and(|id| links_dir().join(id).is_file()))
+}
+
+/// Links kept at most; older ones expire early (a card's link is clicked while it shows).
+const LINKS_KEPT: usize = 256;
+
+/// Removes the oldest links beyond [`LINKS_KEPT`], never the one just made (`keep`).
+fn forget_old_links(keep: &str) {
+    let Ok(entries) = fs::read_dir(links_dir()) else {
+        return;
+    };
+    let mut links: Vec<(SystemTime, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name() != keep)
+        .map(|entry| {
+            let modified = entry.metadata().and_then(|meta| meta.modified());
+            (modified.unwrap_or(SystemTime::UNIX_EPOCH), entry.path())
+        })
+        .collect();
+    if links.len() < LINKS_KEPT {
+        return;
+    }
+    links.sort();
+    for (_, path) in &links[..links.len() + 1 - LINKS_KEPT] {
+        let _ = fs::remove_file(path);
+    }
 }
 
 /// The record behind a link id, while the link is less than a day old.
@@ -883,38 +1066,38 @@ mod tests {
         assert_eq!(safe_component("a/b:c"), "a∕b꞉c");
         assert_eq!(safe_component(".."), "_..");
         assert_eq!(safe_component("tab\there"), "tab here");
-        assert_eq!(safe_component("Invoice.php"), "Invoice.php");
+        assert_eq!(safe_component("parser.rs"), "parser.rs");
     }
 
     #[test]
     fn sidecar_names() {
         assert_eq!(
-            sidecar(Path::new("/c/repo/app/8a7b6c5 Invoice.php")),
-            Path::new("/c/repo/app/.8a7b6c5 Invoice.php.json")
+            sidecar(Path::new("/c/repo/src/8a7b6c5 parser.rs")),
+            Path::new("/c/repo/src/.8a7b6c5 parser.rs.json")
         );
     }
 
     #[test]
     fn snapshot_names() {
         let dir = std::env::temp_dir().join(format!("revs-test-{}", unique_id()));
-        let commit = Side::commit("8a7b6c5d4e3f2a1b", "app/Invoice.php");
+        let commit = Side::commit("8a7b6c5d4e3f2a1b", "src/parser.rs");
         let right = snapshot(&dir, &commit, b"x\n", false, None).unwrap();
-        assert_eq!(right, dir.join("app/8a7b6c5 Invoice.php"));
+        assert_eq!(right, dir.join("src/8a7b6c5 parser.rs"));
         let left = snapshot(&dir, &commit, b"x\n", true, None).unwrap();
-        assert_eq!(left, dir.join("app/.Invoice.php/8a7b6c5"));
+        assert_eq!(left, dir.join("src/.parser.rs/8a7b6c5"));
         // Same short id, different contents (another commit): a longer label.
-        let clash = Side::commit("8a7b6c5b00000000", "app/Invoice.php");
-        assert_eq!(snapshot(&dir, &clash, b"y\n", false, None).unwrap(), dir.join("app/8a7b6c5b00 Invoice.php"));
+        let clash = Side::commit("8a7b6c5b00000000", "src/parser.rs");
+        assert_eq!(snapshot(&dir, &clash, b"y\n", false, None).unwrap(), dir.join("src/8a7b6c5b00 parser.rs"));
         // Whole-name files keep their name.
         let docker = Side::commit("8a7b6c5d4e3f2a1b", "Dockerfile");
         assert_eq!(snapshot(&dir, &docker, b"FROM x\n", false, None).unwrap(), dir.join("8a7b6c5/Dockerfile"));
         // Working versions are never rewritten: a different version takes the next label.
-        let working = Side::working("app/Invoice.php");
-        let head = Side::commit("1111111aaaa", "app/Invoice.php");
+        let working = Side::working("src/parser.rs");
+        let head = Side::commit("1111111aaaa", "src/parser.rs");
         let first = snapshot(&dir, &working, b"one\n", false, Some(&head)).unwrap();
-        assert_eq!(first, dir.join("app/Working Invoice.php"));
+        assert_eq!(first, dir.join("src/Working parser.rs"));
         let second = snapshot(&dir, &working, b"two\n", false, Some(&head)).unwrap();
-        assert_eq!(second, dir.join("app/Working 2 Invoice.php"));
+        assert_eq!(second, dir.join("src/Working 2 parser.rs"));
         assert_eq!(fs::read(&first).unwrap(), b"one\n");
         assert_eq!(snapshot(&dir, &working, b"one\n", false, Some(&head)).unwrap(), first);
         let _ = fs::remove_dir_all(&dir);

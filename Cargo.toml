@@ -1,6 +1,6 @@
 [package]
 name = "revs-zed"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -11,6 +11,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 zed_extension_api = "0.7.0"
+# Checks the downloaded server against the checksums in server.sha256.
+sha2 = { version = "0.10", default-features = false }
 
 [profile.release]
 opt-level = "s"

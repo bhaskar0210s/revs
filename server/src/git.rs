@@ -53,6 +53,30 @@ fn git_binary() -> &'static Path {
     })
 }
 
+/// Reads a small file of a repository's own records (`.git`, HEAD, refs): only a regular
+/// file, and at most `limit` bytes. A folder can hold anything under those names (a FIFO
+/// would block, a link to /dev/zero never ends).
+fn read_small(path: &Path, limit: u64) -> Option<String> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+        return None;
+    }
+    let mut text = String::new();
+    file.take(limit).read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// A full object id (SHA-1 or SHA-256).
+fn is_object_id(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 impl Repo {
     /// Finds the repository containing `path` by walking up to the nearest `.git`.
     pub fn discover(path: &Path) -> Option<Arc<Repo>> {
@@ -68,7 +92,7 @@ impl Repo {
                     dot_git
                 } else {
                     // Linked worktree or submodule: "gitdir: <path>".
-                    let content = fs::read_to_string(&dot_git).ok()?;
+                    let content = read_small(&dot_git, 4096)?;
                     let target = content.trim().strip_prefix("gitdir:")?.trim();
                     let target = Path::new(target);
                     if target.is_absolute() {
@@ -77,8 +101,8 @@ impl Repo {
                         dir.join(target)
                     }
                 };
-                let common_dir = match fs::read_to_string(git_dir.join("commondir")) {
-                    Ok(common) => {
+                let common_dir = match read_small(&git_dir.join("commondir"), 4096) {
+                    Some(common) => {
                         let common = Path::new(common.trim());
                         if common.is_absolute() {
                             common.to_path_buf()
@@ -86,7 +110,7 @@ impl Repo {
                             git_dir.join(common)
                         }
                     }
-                    Err(_) => git_dir.clone(),
+                    None => git_dir.clone(),
                 };
                 return Some(Arc::new(Repo {
                     root: dir.to_path_buf(),
@@ -101,7 +125,9 @@ impl Repo {
         }
     }
 
-    /// A `git` command running in the repository root.
+    /// A `git` command running in the repository root. Like Zed's own git calls, it never
+    /// runs a repository's fsmonitor hook, and never runs gpg to show signatures (whose
+    /// output would also corrupt the formats Revs parses).
     pub fn git(&self) -> Command {
         let mut command = Command::new(git_binary());
         command
@@ -110,9 +136,50 @@ impl Repo {
             .env("GIT_TERMINAL_PROMPT", "0")
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
+            .args(["-c", "core.fsmonitor=false", "-c", "log.showSignature=false"])
             .args(["-c", "core.quotepath=off", "--no-pager"])
             .stdin(Stdio::null());
         command
+    }
+
+    /// A working-tree file by its path in the repository, when that is a plain relative
+    /// path (one from history can say `../x`) to a regular file, with no symlinked folder
+    /// on the way (git never checks a file out beneath a symlink). The file itself may be a
+    /// tracked symlink, which Zed follows too.
+    pub fn working_file(&self, path: &str) -> Option<PathBuf> {
+        let relative = Path::new(path);
+        let parts: Vec<_> = relative.components().collect();
+        if path.is_empty() || !parts.iter().all(|part| matches!(part, std::path::Component::Normal(_))) {
+            return None;
+        }
+        let mut folder = self.root.clone();
+        for part in &parts[..parts.len() - 1] {
+            folder.push(part);
+            if !fs::symlink_metadata(&folder).is_ok_and(|meta| meta.is_dir()) {
+                return None;
+            }
+        }
+        let file = self.root.join(relative);
+        fs::metadata(&file).is_ok_and(|meta| meta.is_file()).then_some(file)
+    }
+
+    /// The text of a working-tree file (see [`Repo::working_file`]).
+    pub fn read_working(&self, path: &str) -> io::Result<Vec<u8>> {
+        use std::io::Read as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let file = self
+            .working_file(path)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no file {path} in the working tree")))?;
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(file)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, format!("{path} isn't a file")));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
     }
 
     /// HEAD's commit id, read from the ref files (re-read at most every 300 ms).
@@ -127,20 +194,35 @@ impl Repo {
     }
 
     fn read_head(&self) -> Option<String> {
-        let head = fs::read_to_string(self.git_dir.join("HEAD")).ok()?;
+        self.read_head_files().or_else(|| {
+            // Ref storage other than files (reftable keeps HEAD as "refs/heads/.invalid").
+            let output = run(self.git().args(["rev-parse", "--verify", "-q", "--end-of-options", "HEAD"])).ok()?;
+            let oid = String::from_utf8_lossy(&output).trim().to_string();
+            is_object_id(&oid).then_some(oid)
+        })
+    }
+
+    /// HEAD from the ref files git keeps by default.
+    fn read_head_files(&self) -> Option<String> {
+        let head = read_small(&self.git_dir.join("HEAD"), 4096)?;
         let head = head.trim();
         let Some(reference) = head.strip_prefix("ref:").map(str::trim) else {
-            return Some(head.to_string());
+            return is_object_id(head).then(|| head.to_string());
         };
+        // A branch name, never a path out of the repository's records.
+        if !reference.starts_with("refs/") || reference.split('/').any(|part| part.is_empty() || part.starts_with('.')) {
+            return None;
+        }
         for dir in [&self.git_dir, &self.common_dir] {
-            if let Ok(oid) = fs::read_to_string(dir.join(reference)) {
-                return Some(oid.trim().to_string());
+            if let Some(oid) = read_small(&dir.join(reference), 4096) {
+                let oid = oid.trim();
+                return is_object_id(oid).then(|| oid.to_string());
             }
         }
-        let packed = fs::read_to_string(self.common_dir.join("packed-refs")).ok()?;
+        let packed = read_small(&self.common_dir.join("packed-refs"), 256 << 20)?;
         packed.lines().find_map(|line| {
             let (oid, name) = line.split_once(' ')?;
-            (name == reference).then(|| oid.to_string())
+            (name == reference && is_object_id(oid)).then(|| oid.to_string())
         })
     }
 
@@ -603,9 +685,19 @@ impl Remote {
         let path = path.trim_matches('/');
         let path = path.strip_suffix(".git").unwrap_or(path);
         // A web page needs a real host name (`gh:` style aliases aren't one).
-        if host.is_empty() || path.is_empty() || !host.contains('.') || host.contains('/') {
+        let host_ok = host.contains('.') && host.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-_".contains(&byte));
+        if host.is_empty() || path.is_empty() || !host_ok {
             return None;
         }
+        // The URL goes into Markdown links: anything else in the path is percent-encoded,
+        // so it can't end a link or start another.
+        let path: String = path
+            .bytes()
+            .map(|byte| match byte {
+                byte if byte.is_ascii_alphanumeric() || b"-._~/%+@".contains(&byte) => char::from(byte).to_string(),
+                byte => format!("%{byte:02X}"),
+            })
+            .collect();
         let lower = host.to_lowercase();
         let host_kind = if lower.contains("github") {
             Host::GitHub
@@ -681,6 +773,105 @@ mod tests {
         assert!(Remote::parse("file:///Volumes/Backup/repo.git").is_none());
         assert!(Remote::parse("/Volumes/Backup/repo.git").is_none());
         assert!(Remote::parse("gh:acme/payroll.git").is_none());
+        // Nothing that could end a Markdown link early or add one.
+        assert_eq!(
+            Remote::parse("git@github.com:o/r) [x](file:///tmp/y").unwrap().web,
+            "https://github.com/o/r%29%20%5Bx%5D%28file%3A///tmp/y"
+        );
+        assert_eq!(Remote::parse("https://github.com/o/r<x>").unwrap().web, "https://github.com/o/r%3Cx%3E");
+        assert!(Remote::parse("https://git hub.com/o/r").is_none());
+        assert!(Remote::parse("https://github.com)/o/r").is_none());
+        // Names services allow keep their link.
+        assert_eq!(
+            Remote::parse("https://dev.azure.com/org/Project%20(Legacy)/_git/Repo").unwrap().web,
+            "https://dev.azure.com/org/Project%20%28Legacy%29/_git/Repo"
+        );
+        assert_eq!(Remote::parse("git@git_server.example.com:team/repo.git").unwrap().web, "https://git_server.example.com/team/repo");
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("revs-git-{name}-{}", crate::view::unique_id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn repository_records_must_be_small_regular_files() {
+        // A `.git` that is a FIFO would block a plain read; a link to /dev/zero never ends.
+        let dir = scratch("special");
+        let fifo = std::ffi::CString::new(dir.join(".git").to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(Repo::discover(&dir.join("file.txt")).is_none());
+        fs::remove_file(dir.join(".git")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", dir.join(".git")).unwrap();
+        assert!(Repo::discover(&dir.join("file.txt")).is_none());
+        fs::remove_file(dir.join(".git")).unwrap();
+
+        // HEAD naming a path outside the repository's refs is not followed.
+        fs::create_dir_all(dir.join(".git/refs/heads")).unwrap();
+        let oid = "1f3c2e9a".repeat(5);
+        fs::write(dir.join(".git/refs/heads/main"), format!("{oid}\n")).unwrap();
+        fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let repo = Repo::discover(&dir.join("file.txt")).unwrap();
+        assert_eq!(repo.read_head().as_deref(), Some(oid.as_str()));
+        fs::write(dir.join("outside"), format!("{oid}\n")).unwrap();
+        fs::write(dir.join(".git/HEAD"), "ref: refs/../../outside\n").unwrap();
+        assert_eq!(repo.read_head(), None);
+        fs::write(dir.join(".git/HEAD"), "not an id\n").unwrap();
+        assert_eq!(repo.read_head(), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn head_in_other_ref_storage() {
+        // reftable keeps HEAD as "ref: refs/heads/.invalid"; git itself then answers.
+        let dir = scratch("reftable");
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q", "--ref-format=reftable"]).status.success() {
+            return; // a git without reftable
+        }
+        fs::write(dir.join("f.txt"), "x\n").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["-c", "commit.gpgsign=false", "commit", "-q", "-m", "c"]);
+        let expected = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout).trim().to_string();
+        let repo = Repo::discover(&dir.join("f.txt")).unwrap();
+        assert_eq!(repo.head(), Some(expected));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn working_files_stay_in_the_working_tree() {
+        let dir = scratch("working");
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/a.txt"), "inside\n").unwrap();
+        let repo = Repo::discover(&dir.join("sub/a.txt")).unwrap();
+        assert_eq!(repo.read_working("sub/a.txt").unwrap(), b"inside\n");
+        // History can name paths git itself refuses to check out.
+        for path in ["sub/../../outside.txt", "../outside.txt", "/etc/hosts", "", "sub"] {
+            assert!(repo.read_working(path).is_err(), "{path}");
+        }
+        std::os::unix::fs::symlink("/dev/zero", dir.join("zero")).unwrap();
+        assert!(repo.read_working("zero").is_err());
+        // A symlinked folder can't lead out of the working tree; a tracked symlink is the
+        // file git checked out.
+        fs::write(dir.join("outside.txt"), "outside\n").unwrap();
+        std::os::unix::fs::symlink("..", dir.join("sub/up")).unwrap();
+        assert!(repo.read_working("sub/up/outside.txt").is_err());
+        std::os::unix::fs::symlink("a.txt", dir.join("sub/link.txt")).unwrap();
+        assert_eq!(repo.read_working("sub/link.txt").unwrap(), b"inside\n");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

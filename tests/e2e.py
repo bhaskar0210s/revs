@@ -786,6 +786,27 @@ def main():
     subprocess.run([BIN, "next", view34, "1"], env=env(), check=True, cwd=REPO)
     check(diff_of(cli_calls()[-1])[1] == right_file("app.txt", short[5]), "command-line next from a snapshot")
 
+    print("what Revs keeps on disk stays private")
+    mode = lambda path: oct(os.stat(path).st_mode & 0o777)
+    check(mode(CACHE) == "0o700", f"the cache folder is the user's only: {mode(CACHE)}")
+    support = os.path.join(HOME, "Library/Application Support/Revs")
+    check(mode(support) == "0o700", f"so is the settings folder: {mode(support)}")
+    check(mode(os.path.join(CACHE, "repos.json")) == "0o600", "the list of repositories is private")
+    record = os.path.join(os.path.dirname(view12), "." + os.path.basename(view12) + ".json")
+    check(mode(record) == "0o600", "and so are diff records")
+
+    print("a repository's own hook programs don't run")
+    marker = os.path.join(WORK, "hook-ran")
+    hook = os.path.join(WORK, "hook.sh")
+    with open(hook, "w") as f:
+        f.write(f"#!/bin/sh\necho \"$*\" >> '{marker}'\nexit 1\n")
+    os.chmod(hook, 0o755)
+    git("config", "core.fsmonitor", hook)
+    subprocess.run([BIN, "previous", app, "2"], env=env(), check=True, cwd=REPO)
+    git("config", "--unset", "core.fsmonitor")
+    check(diff_of(cli_calls()[-1])[1] == right_file("old_name.txt", short[2]) and not os.path.exists(marker),
+          "core.fsmonitor never runs")
+
 
     print()
     if failures:

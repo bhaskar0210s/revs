@@ -23,6 +23,9 @@ revs — line history for Zed
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if !matches!(args.first().map(String::as_str), Some("--version" | "version")) {
+        view::make_private_dirs();
+    }
     let code = match args.first().map(String::as_str) {
         Some("lsp" | "--stdio") => {
             server::run();

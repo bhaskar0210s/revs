@@ -184,10 +184,11 @@ impl Toggle {
         self.value = Some(on);
         let _ = std::fs::create_dir_all(view::support_dir());
         let tmp = self.path.with_file_name(format!(".state-{}.json", view::unique_id()));
-        if std::fs::write(&tmp, serde_json::to_vec(&json!({ "lineBlame": on })).unwrap_or_default()).is_ok()
-            && std::fs::rename(&tmp, &self.path).is_ok()
-        {
+        let state = serde_json::to_vec(&json!({ "lineBlame": on })).unwrap_or_default();
+        if view::write_new(&tmp, &state, 0o600).is_ok() && std::fs::rename(&tmp, &self.path).is_ok() {
             self.modified = std::fs::metadata(&self.path).and_then(|meta| meta.modified()).ok();
+        } else {
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 }
@@ -477,27 +478,30 @@ pub fn run() {
     });
     let reader_events = events.clone();
     std::thread::spawn(move || {
+        // However the reader stops (end of input, a bad frame, a panic), the server stops
+        // with it rather than waiting for messages that can't come.
+        struct EndOnDrop(mpsc::Sender<Event>);
+        impl Drop for EndOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.send(Event::Eof);
+            }
+        }
+        let _end = EndOnDrop(reader_events.clone());
         let mut reader = BufReader::new(io::stdin().lock());
-        loop {
-            match rpc::read_message(&mut reader) {
-                Ok(Some(message)) => {
-                    if reader_events.send(Event::Message(message)).is_err() {
-                        break;
-                    }
-                }
-                Ok(None) | Err(_) => {
-                    let _ = reader_events.send(Event::Eof);
-                    break;
-                }
+        while let Ok(Some(message)) = rpc::read_message(&mut reader) {
+            if reader_events.send(Event::Message(message)).is_err() {
+                break;
             }
         }
     });
 
     let trace = view::trace_enabled()
         .then(|| {
+            use std::os::unix::fs::OpenOptionsExt as _;
             std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
+                .mode(0o600)
                 .open(view::cache_dir().join("trace.log"))
                 .ok()
         })
@@ -612,17 +616,17 @@ pub struct Job {
     /// The working file, when it isn't open in this process (another project folder's
     /// Revs may have it, with unsaved changes).
     elsewhere: Option<PathBuf>,
-    /// Where the step started, for the card: "Invoice.php line 214".
+    /// Where the step started, for the card: "parser.rs line 214".
     source: String,
     events: mpsc::Sender<Event>,
 }
 
-/// "Invoice.php line 214" (`what` is "line", "removed line", …; `line` 0-based).
+/// "parser.rs line 214" (`what` is "line", "removed line", …; `line` 0-based).
 fn place(path: &str, what: &str, line: u32) -> String {
     format!("{} {what} {}", file_name(path), line + 1)
 }
 
-/// "Invoice.php lines 3–9".
+/// "parser.rs lines 3–9".
 fn place_range(path: &str, what: &str, first: u32, last: u32) -> String {
     format!("{} {what} {}–{}", file_name(path), first + 1, last + 1)
 }
@@ -708,8 +712,8 @@ impl Job {
         }
     }
 
-    /// "**8a7b6c5** Fix totals (#12)  ↵ You · Jan 5, 2026 (9 months ago) · from
-    /// Invoice.php line 214 · GitHub"
+    /// "**8a7b6c5** Fix typo (#12)  ↵ You · Jan 5, 2026 (9 months ago) · from
+    /// parser.rs line 214 · GitHub"
     fn card(&self, left: &Side, right: &Side, note: Option<&str>) -> String {
         let mut out = match right.rev.as_str() {
             view::WORKING => "**Uncommitted changes**".to_string(),
@@ -893,7 +897,7 @@ fn shown_commit(outcome: &Outcome) -> Option<&str> {
 }
 
 /// A step from a Revs diff, and the words for where it started ("from
-/// Invoice.php line 214").
+/// parser.rs line 214").
 fn navigate_view(
     job: &Job,
     blobs: &Blobs,
@@ -1232,6 +1236,13 @@ impl Server {
     fn log(&mut self, direction: &str, message: &Value) {
         if let Some(trace) = &mut self.trace {
             use std::io::Write as _;
+            // The trace stays a few MB however long the server runs.
+            static LINES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if LINES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 1000 == 999
+                && trace.metadata().is_ok_and(|meta| meta.len() > 8 << 20)
+            {
+                let _ = trace.set_len(0);
+            }
             let now = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default();
@@ -1555,7 +1566,9 @@ impl Server {
     }
 
     fn did_open(&mut self, params: &mut Value) {
-        let document = &mut params["textDocument"];
+        let Some(document) = params.get_mut("textDocument") else {
+            return;
+        };
         let Some(uri) = document["uri"].as_str().map(str::to_string) else {
             return;
         };
@@ -1672,6 +1685,9 @@ impl Server {
         // The lines the changes span once made, and where the first one began.
         let mut span: Option<(u32, u32, (u32, u32))> = None;
         for mut change in changes {
+            if !change.is_object() {
+                continue;
+            }
             let edit: LineEdit = if change.get("range").is_some_and(|range| !range.is_null()) {
                 let (start, end) = (position(&change["range"]["start"]), position(&change["range"]["end"]));
                 let text = change["text"].as_str().unwrap_or_default();
@@ -2193,12 +2209,13 @@ impl Server {
             self.respond(id, hint);
             return;
         };
-        // Cards are rebuilt after an hour, well before their links expire.
+        // Cards are rebuilt after an hour, well before their links expire, or sooner when
+        // a link's record was cleared to make room.
         if job.cacheable()
             && let Some((markdown, _)) = self
                 .tooltips
                 .get(&job.key)
-                .filter(|(_, made)| made.elapsed() < Duration::from_secs(3600))
+                .filter(|(markdown, made)| made.elapsed() < Duration::from_secs(3600) && view::links_alive(markdown))
                 .cloned()
         {
             set_tooltip(&mut hint, &markdown);
@@ -2602,9 +2619,15 @@ fn line_target(entry: LineBlame, commit: Option<&Commit>, line: u32, doc: &Doc) 
 
 fn set_tooltip(hint: &mut Value, markdown: &str) {
     let tooltip = json!({ "kind": "markdown", "value": markdown });
-    match hint["label"].as_array_mut() {
-        Some(parts) if !parts.is_empty() => parts[0]["tooltip"] = tooltip,
-        _ => hint["tooltip"] = tooltip,
+    let part = hint
+        .get_mut("label")
+        .and_then(Value::as_array_mut)
+        .and_then(|parts| parts.first_mut())
+        .and_then(Value::as_object_mut);
+    if let Some(part) = part {
+        part.insert("tooltip".into(), tooltip);
+    } else if let Some(hint) = hint.as_object_mut() {
+        hint.insert("tooltip".into(), tooltip);
     }
 }
 
@@ -2717,7 +2740,7 @@ mod tests {
 
     #[test]
     fn places() {
-        assert_eq!(place("app/Billing/Invoice.php", "line", 213), "Invoice.php line 214");
+        assert_eq!(place("src/syntax/parser.rs", "line", 213), "parser.rs line 214");
         assert_eq!(place("README.md", "removed line", 0), "README.md removed line 1");
         assert_eq!(place_range("a/b.rs", "lines", 2, 8), "b.rs lines 3–9");
     }

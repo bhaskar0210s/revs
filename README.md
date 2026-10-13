@@ -5,7 +5,7 @@ From the line you're on, open the commit that last changed it, or the next one, 
 side-by-side diff, scrolled to that line. It works from both sides of the diff, so you can keep
 walking one line's history backwards and forwards. Optional git blame for the cursor line.
 
-A 0.75 MB native language server that uses about 1.6 MB of memory. Free and open source.
+A 0.77 MB native language server that uses about 1.6 MB of memory. Free and open source.
 
 | Command | What it does |
 | --- | --- |
@@ -13,9 +13,9 @@ A 0.75 MB native language server that uses about 1.6 MB of memory. Free and open
 | **Revs: Next Revision** | The next commit that changed or removed the line. At the end it shows your uncommitted changes. |
 | **Revs: Open Working File** | From a diff, opens the working file (editable) at the same line, followed through later commits. |
 | **Revs: Open Commit on GitHub** | Opens the commit on GitHub (or GitLab or Bitbucket, named after your remote). |
-| **Revs: Toggle Line Blame** | Shows or hides blame for the cursor line (`You, last month • Fix totals (#12)`). It is off by default, and the choice is remembered. |
+| **Revs: Toggle Line Blame** | Shows or hides blame for the cursor line (`You, last month • Fix typo (#12)`). It is off by default, and the choice is remembered. |
 
-Each step opens a new diff tab named after the two commits, e.g. `1f3c2e9 ↔ 8a7b6c5 Invoice.php`.
+Each step opens a new diff tab named after the two commits, e.g. `1f3c2e9 ↔ 8a7b6c5 parser.rs`.
 A card in the corner names the commit shown, its author and date, and the file and line the
 step started from, with a link to the commit. It closes by itself.
 
@@ -25,8 +25,10 @@ Requires a Mac with Apple silicon, macOS 27 or later, and Zed 1.23 or later.
 
 In Zed, open the extensions page (Cmd-Shift-X), search for **Revs** and install it. The first
 time it starts, the extension downloads the Revs server (`revs-aarch64-apple-darwin.zip` from
-this repository's release of the same version, about 0.4 MB) into its own folder. Revs runs on
-Macs with Apple silicon only; elsewhere the extension says so instead of starting.
+this repository's release of the same version, about 0.4 MB) into its own folder, and checks
+every file of it against the checksums the extension carries: a server that doesn't match is
+never run. Revs runs on Macs with Apple silicon only; elsewhere the extension says so instead
+of starting.
 
 Not in the list yet? Clone this repository and run `zed: install dev extension` on its folder
 (needs Rust from [rustup](https://rustup.rs) with `rustup target add wasm32-wasip2`).
@@ -40,10 +42,11 @@ Then add these to Zed's `settings.json` (Cmd-, ):
 "minimum_split_diff_width": 0
 ```
 
-If you list `language_servers` for a language yourself, add `"revs"` to that list, e.g.
+If you list `language_servers` for a language yourself without `"..."` (all the others), add
+`"revs"` to that list, e.g.
 
 ```jsonc
-"languages": { "PHP": { "language_servers": ["intelephense", "revs", "..."] } }
+"languages": { "Python": { "language_servers": ["basedpyright", "ruff", "revs"] } }
 ```
 
 ## Using it
@@ -101,13 +104,22 @@ All optional, under `lsp.revs.initialization_options` (or `lsp.revs.settings`):
 | `fastCursor` | `false` | also follow the cursor through linked-editing requests (about 50 ms instead of about 250 ms). Zed sends those only to the first server that offers linked editing, so this can take tag renaming away from HTML or Vue servers. |
 | `summaryLength` | `50` | characters of the commit summary in the line blame |
 
-To run a server you built yourself, set `lsp.revs.binary.path`.
+To run a server you built yourself, set `lsp.revs.binary.path` to it, with
+`"arguments": ["lsp"]`.
 
 ## Privacy
 
 Everything stays on your Mac. Revs reads your repository with git, writes diff snapshots to
-`~/Library/Caches/Revs`, and talks only to Zed. The only network access is the extension
-downloading the server from this repository's GitHub releases. No telemetry, no accounts.
+`~/Library/Caches/Revs` and the line blame setting to `~/Library/Application Support/Revs`
+(folders only you can open), registers its `revs://` links with macOS, and talks only to Zed.
+The extension downloads the server from this repository's GitHub releases; apart from that,
+the only network access is git's own: in a partial clone, git fetches the file versions it
+doesn't have yet from your remote, as it does for any git command there. No telemetry, no
+accounts.
+
+In a project you share with collaborators, those who can edit can run Revs's commands too,
+like any language server's. A step that ends at the working file shows its unsaved changes,
+including ones made in another Zed window.
 
 ## How it fits into Zed
 
@@ -132,14 +144,14 @@ named after their commit. Commit snapshots are shared between diffs, and a snaps
 rewritten while it exists. Snapshots are removed once no diff can still show them: after Zed
 restarts, or a week after they were last used, unless a diff in another Zed window still shows
 them. The line blame hover card's links carry only a random id for a record in Revs's cache, so
-they work on this Mac, for a day.
+they work on this Mac, for up to a day.
 
 ## How it stays small
 
 Git runs in short-lived processes, using the real git binary rather than the `/usr/bin/git`
 shim. On a 13,000-line file with a few hundred commits of history, a step usually takes 0.05–0.3 s before
 Zed starts drawing the diff (up to about 0.5 s when `git blame` has to go far back). The server
-is a 0.75 MB binary, and its memory footprint (Activity Monitor's "Memory") stays around 1.6 MB,
+is a 0.77 MB binary, and its memory footprint (Activity Monitor's "Memory") stays around 1.6 MB,
 measured with `footprint` during a soak test of thousands of cursor moves, edits and steps.
 
 ## Build from source

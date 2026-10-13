@@ -188,7 +188,7 @@ impl Tooltip {
                 // Where the line is in the saved file: the link handler only has that. A
                 // line typed since the last save has no place there yet.
                 record["working"] = json!(true);
-                let saved = fs::read(self.repo.root.join(&self.rel)).unwrap_or_default();
+                let saved = self.repo.read_working(&self.rel).unwrap_or_default();
                 let hunks = diff::hunks(&String::from_utf8_lossy(&saved), buffer);
                 match diff::new_to_old(&hunks, *line) {
                     diff::NewToOld::Unchanged(saved_line) => {
@@ -277,7 +277,7 @@ fn carry_out(
 // ---- URL handler -----------------------------------------------------------------------
 
 /// Handles `revs://changes?id=…` (from the line blame hover card). The id names a
-/// record Revs stored when it made the card; links work only on this Mac, for a day.
+/// record Revs stored when it made the card; links work only on this Mac, for up to a day.
 pub fn handle_url(url: &str) -> io::Result<()> {
     let rest = url
         .strip_prefix("revs://")
@@ -314,7 +314,7 @@ pub fn handle_url(url: &str) -> io::Result<()> {
         if record["unsaved"].as_bool() == Some(true) {
             return Err(io::Error::other("this line isn't saved yet: save the file first"));
         }
-        let saved = fs::read(repo.root.join(&file))?;
+        let saved = repo.read_working(&file)?;
         let wanted = text("text").unwrap_or_default();
         if history::lines_of(&saved).get(line as usize) != Some(&wanted.as_bytes()) {
             return Err(io::Error::other("the file changed since the card was made: hover the line again"));

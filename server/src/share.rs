@@ -7,7 +7,7 @@
 //! `.wants/<id>.want` (the file's path), and the process that has it answers with
 //! `.wants/<id>.text`. Processes wait for requests in a kqueue, so nothing runs while idle.
 
-use crate::view::{cache_dir, unique_id};
+use crate::view::{cache_dir, read_record, unique_id};
 use std::fs;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
@@ -82,8 +82,7 @@ fn dirty_elsewhere(path: &Path) -> bool {
             let _ = fs::remove_file(&file);
             continue;
         }
-        let listed = fs::read(&file)
-            .ok()
+        let listed = read_record(&file, 16 << 20)
             .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
             .is_some_and(|list| list.iter().any(|known| Path::new(known) == path));
         if listed {
@@ -119,9 +118,14 @@ pub fn unsaved_text(path: &Path) -> Option<Vec<u8>> {
     text
 }
 
-/// Answers a request with a working file's text.
+/// Answers a request with a working file's text, while the process that asked (the id is
+/// `<pid>-<n>`) is still waiting.
 pub fn answer(id: &str, text: &[u8]) {
-    if id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') && wants_dir().join(format!("{id}.want")).exists() {
+    let asker = id.split('-').next().and_then(|pid| pid.parse::<i32>().ok());
+    if id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && asker.is_some_and(|pid| pid > 0 && alive(pid))
+        && wants_dir().join(format!("{id}.want")).exists()
+    {
         write_private(&wants_dir().join(format!("{id}.text")), text);
     }
 }
@@ -180,23 +184,27 @@ pub fn watch(handle: impl Fn(String, PathBuf) + Send + 'static) {
             let mut current = Vec::new();
             for entry in entries.filter_map(Result::ok) {
                 let name = entry.file_name().to_string_lossy().into_owned();
+                let stale = entry
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age > Duration::from_secs(60)));
                 let Some(id) = name.strip_suffix(".want") else {
+                    // Answers nobody collected (their asker is gone).
+                    if stale {
+                        let _ = fs::remove_file(entry.path());
+                    }
                     continue;
                 };
                 current.push(id.to_string());
                 if seen.iter().any(|known| known == id) {
                     continue;
                 }
-                let stale = entry
-                    .metadata()
-                    .and_then(|meta| meta.modified())
-                    .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age > Duration::from_secs(60)));
                 if stale {
                     let _ = fs::remove_file(entry.path());
                     continue;
                 }
-                if let Ok(path) = fs::read_to_string(entry.path()) {
-                    handle(id.to_string(), PathBuf::from(path));
+                if let Some(path) = read_record(&entry.path(), 4096) {
+                    handle(id.to_string(), PathBuf::from(String::from_utf8_lossy(&path).as_ref()));
                 }
             }
             // Requests are answered once; forget the ones that are gone.

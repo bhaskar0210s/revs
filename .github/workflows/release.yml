@@ -1,35 +1,63 @@
 name: release
 
-# Pushing a tag such as v1.0.1 builds the Revs server and publishes it. The Revs extension of the
-# same version downloads it the first time it starts the server.
+# Pushing a tag such as v1.0.1 builds the Revs server and publishes it, if it is exactly the
+# server listed in the tagged commit's server.sha256 (see `make checksums`). The Revs extension
+# of the same version downloads it the first time it starts the server, and runs it only if
+# every file matches those checksums.
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
-  release:
+  build:
     runs-on: xcode-27
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-      - name: Rust
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The tag matches the version
         run: |
-          if ! command -v rustup >/dev/null; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
-          fi
-          rustup toolchain install stable --profile minimal
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' extension.toml)
+          test "$GITHUB_REF_NAME" = "v$version"
+          grep -qx "version = \"$version\"" Cargo.toml
+          grep -qx "version = \"$version\"" server/Cargo.toml
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal
       - name: Tests
         run: make test
-      - name: Build
-        run: make zip VERSION="${GITHUB_REF_NAME#v}"
+      - name: Package
+        run: make zip
+      - name: The server is the one server.sha256 lists
+        run: make check-checksums
+      - name: Tests on the server as it ships
+        run: make test-shipped
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: build/revs-aarch64-apple-darwin.zip
+          retention-days: 1
+
+  # Only this job can write to the repository, and it runs none of the build's code.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "$GITHUB_REF_NAME" build/revs-aarch64-apple-darwin.zip \
+          gh release create "$GITHUB_REF_NAME" revs-aarch64-apple-darwin.zip --verify-tag \
             --title "Revs ${GITHUB_REF_NAME#v}" \
-            --notes "The Revs language server for Macs with Apple silicon running macOS 27 or later. Install the Revs extension from Zed's extensions page: it downloads this release by itself."
+            --notes "The Revs language server for Macs with Apple silicon running macOS 27 or later. Install the Revs extension from Zed's extensions page: it downloads this release by itself, and checks every file against the checksums it carries before running it."
