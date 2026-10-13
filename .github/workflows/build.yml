@@ -1,0 +1,30 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install stable --profile minimal --target wasm32-wasip2
+      - name: Tests
+        run: make test
+      - name: Extension
+        run: make extension
+      - name: Server
+        run: make zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Revs
+          path: build/revs-aarch64-apple-darwin.zip

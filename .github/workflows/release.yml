@@ -1,0 +1,35 @@
+name: release
+
+# Pushing a tag such as v1.0.1 builds the Revs server and publishes it. The Revs extension of the
+# same version downloads it the first time it starts the server.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install stable --profile minimal
+      - name: Tests
+        run: make test
+      - name: Build
+        run: make zip VERSION="${GITHUB_REF_NAME#v}"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" build/revs-aarch64-apple-darwin.zip \
+            --title "Revs ${GITHUB_REF_NAME#v}" \
+            --notes "The Revs language server for Macs with Apple silicon running macOS 27 or later. Install the Revs extension from Zed's extensions page: it downloads this release by itself."

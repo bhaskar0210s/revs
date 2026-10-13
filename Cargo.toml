@@ -1,0 +1,21 @@
+[package]
+name = "revs-zed"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+# The language server in server/ is a separate native build.
+[workspace]

@@ -1,0 +1,22 @@
+id = "revs-lsp"
+name = "Revs: Git Blame, Line History & Revision Diffs"
+description = "Git line history like GitLens: open the previous or next revision of the current line in a side-by-side diff, with optional git blame. Apple silicon Macs only."
+version = "1.0.0"
+schema_version = 1
+authors = ["Revs contributors"]
+repository = "https://github.com/bhaskar0210s/revs"
+
+[language_servers.revs]
+name = "Revs"
+languages = [
+    "Astro", "Batch", "Blade", "C", "C#", "C++", "CMake", "CSS", "CSV", "Clojure", "Crystal",
+    "Dart", "Dockerfile", "ERB", "Elixir", "Elm", "Env", "Erlang", "F#", "Fish", "GLSL",
+    "Git Attributes", "Git Config", "Git Ignore", "Gleam", "Go", "Go Mod", "Go Work", "GraphQL",
+    "Groovy", "HCL", "HEEX", "HTML", "Handlebars", "Haskell", "INI", "JSON", "JSON5", "JSONC",
+    "Java", "JavaScript", "Jsonnet", "Julia", "Just", "Kotlin", "LaTeX", "Less", "Liquid", "Lua",
+    "MDX", "Make", "Markdown", "Nim", "Nix", "Nu", "OCaml", "Objective-C", "PHP", "Perl",
+    "Plain Text", "PowerShell", "Prisma", "Proto", "Python", "R", "Racket", "Ruby", "Rust",
+    "SCSS", "SQL", "Sass", "Scala", "Scheme", "Shell Script", "Solidity", "Starlark", "Svelte",
+    "Swift", "TOML", "TSX", "Terraform", "Twig", "TypeScript", "Typst", "Vue.js", "WGSL", "XML",
+    "YAML", "Zig",
+]
