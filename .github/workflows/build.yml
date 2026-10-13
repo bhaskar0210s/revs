@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  build:
+  server:
     runs-on: xcode-27
     steps:
       - uses: actions/checkout@v7
@@ -17,14 +17,22 @@ jobs:
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
-          rustup toolchain install stable --profile minimal --target wasm32-wasip2
+          rustup toolchain install stable --profile minimal
       - name: Tests
         run: make test
-      - name: Extension
-        run: make extension
-      - name: Server
+      - name: Package
         run: make zip
       - uses: actions/upload-artifact@v7
         with:
-          name: Revs
+          name: revs-aarch64-apple-darwin
           path: build/revs-aarch64-apple-darwin.zip
+
+  # Zed's extension registry builds the extension on Linux; so does this check.
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --target wasm32-wasip2
+      - name: Build
+        run: cargo build --release --target wasm32-wasip2
