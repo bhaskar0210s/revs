@@ -29,12 +29,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 // Zed lists a server's commands sorted by name. Zero-width spaces after "Revs:" (none
 // for the first, one more for each after it) keep the names as they read and put them in
-// this order: Previous, Next, Open Working File, Open Commit, Toggle Line Blame.
+// this order: Previous, Toggle Line Blame, Next, Open Working File, Open Commit.
 pub const PREVIOUS: &str = "Revs: Previous Revision";
-pub const NEXT: &str = "Revs:\u{200B} Next Revision";
-pub const OPEN_FILE: &str = "Revs:\u{200B}\u{200B} Open Working File";
-const OPEN_COMMIT_PREFIX: &str = "Revs:\u{200B}\u{200B}\u{200B} Open Commit on ";
-pub const TOGGLE_BLAME: &str = "Revs:\u{200B}\u{200B}\u{200B}\u{200B} Toggle Line Blame";
+pub const TOGGLE_BLAME: &str = "Revs:\u{200B} Toggle Line Blame";
+pub const NEXT: &str = "Revs:\u{200B}\u{200B} Next Revision";
+pub const OPEN_FILE: &str = "Revs:\u{200B}\u{200B}\u{200B} Open Working File";
+const OPEN_COMMIT_PREFIX: &str = "Revs:\u{200B}\u{200B}\u{200B}\u{200B} Open Commit on ";
 
 /// Files above this many lines get a single-line blame first so the annotation shows up
 /// before the full blame finishes.
@@ -1498,7 +1498,7 @@ impl Server {
             // Revs where it is), never for on-format or on-save kinds.
             "codeActionProvider": { "codeActionKinds": [] },
             "executeCommandProvider": {
-                "commands": [PREVIOUS, NEXT, OPEN_FILE, self.open_commit.as_str(), TOGGLE_BLAME],
+                "commands": [PREVIOUS, TOGGLE_BLAME, NEXT, OPEN_FILE, self.open_commit.as_str()],
             },
         });
         if self.settings.fast_cursor {
@@ -2757,7 +2757,7 @@ mod tests {
     #[test]
     fn commands_sort_in_menu_order() {
         let open_commit = format!("{OPEN_COMMIT_PREFIX}GitHub");
-        let order = [PREVIOUS, NEXT, OPEN_FILE, open_commit.as_str(), TOGGLE_BLAME];
+        let order = [PREVIOUS, TOGGLE_BLAME, NEXT, OPEN_FILE, open_commit.as_str()];
         let mut sorted = order;
         sorted.sort();
         assert_eq!(sorted, order);
@@ -2767,10 +2767,10 @@ mod tests {
             shown,
             [
                 "Revs: Previous Revision",
+                "Revs: Toggle Line Blame",
                 "Revs: Next Revision",
                 "Revs: Open Working File",
                 "Revs: Open Commit on GitHub",
-                "Revs: Toggle Line Blame",
             ]
         );
     }

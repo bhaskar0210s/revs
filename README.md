@@ -10,10 +10,10 @@ A 0.77 MB native language server that uses about 1.6 MB of memory. Free and open
 | Command | What it does |
 | --- | --- |
 | **Revs: Previous Revision** | The commit that last changed the line, against its parent. If the open diff already shows that line's change, it goes one change further back. On a removed line (left side), it opens the commit that wrote it. With several lines selected, the newest change among them. |
+| **Revs: Toggle Line Blame** | Shows or hides blame for the cursor line (`You, last month • Fix typo (#12)`). It is off by default, and the choice is remembered. |
 | **Revs: Next Revision** | The next commit that changed or removed the line. At the end it shows your uncommitted changes. |
 | **Revs: Open Working File** | From a diff, opens the working file (editable) at the same line, followed through later commits. |
 | **Revs: Open Commit on GitHub** | Opens the commit on GitHub (or GitLab or Bitbucket, named after your remote). |
-| **Revs: Toggle Line Blame** | Shows or hides blame for the cursor line (`You, last month • Fix typo (#12)`). It is off by default, and the choice is remembered. |
 
 Each step opens a new diff tab named after the two commits, e.g. `1f3c2e9 ↔ 8a7b6c5 parser.rs`.
 A card in the corner names the commit shown, its author and date, and the file and line the

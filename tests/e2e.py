@@ -35,10 +35,10 @@ FAKE_CLI = os.path.join(WORK, "fake-zed-cli")
 
 # Zero-width spaces after "Revs:" make Zed's sorted list show them in this order.
 PREVIOUS = "Revs: Previous Revision"
-NEXT = "Revs:\u200b Next Revision"
-OPEN_FILE = "Revs:\u200b\u200b Open Working File"
-OPEN_COMMIT = "Revs:\u200b\u200b\u200b Open Commit on GitHub"
-TOGGLE = "Revs:\u200b\u200b\u200b\u200b Toggle Line Blame"
+TOGGLE = "Revs:\u200b Toggle Line Blame"
+NEXT = "Revs:\u200b\u200b Next Revision"
+OPEN_FILE = "Revs:\u200b\u200b\u200b Open Working File"
+OPEN_COMMIT = "Revs:\u200b\u200b\u200b\u200b Open Commit on GitHub"
 
 failures = []
 
@@ -303,7 +303,7 @@ def main():
     result = client.request("initialize", {"processId": os.getpid(), "rootUri": uri(REPO), "capabilities": {}})
     caps = result["capabilities"]
     commands = caps["executeCommandProvider"]["commands"]
-    check(commands == [PREVIOUS, NEXT, OPEN_FILE, OPEN_COMMIT, TOGGLE], f"readable command names: {commands}")
+    check(commands == [PREVIOUS, TOGGLE, NEXT, OPEN_FILE, OPEN_COMMIT], f"readable command names: {commands}")
     check(sorted(commands) == commands, "Zed's sorted list shows them in menu order")
     check("codeLensProvider" not in caps, "no code lenses")
     check("linkedEditingRangeProvider" not in caps, "linked editing left to other servers")
